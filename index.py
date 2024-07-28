@@ -1,120 +1,178 @@
-# Install necessary packages (assuming this is run in a Colab environment)
-# !pip install pdfminer.six pytesseract torch langchain langchain_openai langchain_community faiss-cpu python-docx
-
-# Import necessary libraries
-import os
+import pymupdf as fitz  
+from docx import Document
+import pandas as pd
+from PIL import Image
+import io
+from sentence_transformers import SentenceTransformer
+import numpy as np
+import gradio as gr
 import glob
-from pdfminer.high_level import extract_text  # Import PDF text extraction function
-from openpyxl import load_workbook  # Import Excel file handling
-from PIL import Image  # Import PIL for image handling
-import pytesseract  # Import pytesseract for OCR
-from transformers import AutoTokenizer, AutoModel  # Import Hugging Face Transformers
-import torch  # Import PyTorch
-import numpy as np  # Import numpy for array operations
-from google.colab import drive  # Import drive for Google Colab mounting
-from langchain.text_splitter import CharacterTextSplitter  # Import text splitter
-from langchain_openai import OpenAIEmbeddings  # Import OpenAI embeddings
-import openai  # Import OpenAI library
-from langchain.chains.question_answering import load_qa_chain  # Import QA chain loader
-from langchain_openai import OpenAI  # Import OpenAI library (again?)
-from langchain_community.vectorstores import FAISS  # Import FAISS for vector storage
-from docx import Document  # Import Document handling for DOCX files
+import os
+from langchain.text_splitter import CharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings
+import openai
+from langchain.chains.question_answering import load_qa_chain
+from langchain_openai import OpenAI
+from langchain_community.vectorstores import FAISS
+from langchain_openai import ChatOpenAI
+from urllib.parse import quote
+from urllib.parse import unquote
+import base64
 
-# Mount Google Drive for accessing files
-drive.mount('/content/drive')
 
-# Function to extract text from a PDF file
-def extract_text_from_pdf(pdf_path):
+
+
+# Data extraction functions
+
+def extract_from_pdf(pdf_path):
+    """Extract text and images from a PDF file."""
+    doc = fitz.open(pdf_path)
     text = ""
-    try:
-        text = extract_text(pdf_path)  # Use PDFMiner to extract text
-    except Exception as e:
-        print(f"Error extracting text from {pdf_path}: {e}")
-    return text
+    images = []
+    for page in doc:
+        text += page.get_text()
+        for img in page.get_images(full=True):
+            xref = img[0]
+            base_image = doc.extract_image(xref)
+            image_bytes = base_image["image"]
+            image = Image.open(io.BytesIO(image_bytes))
+            images.append(image)
+    return text, images
 
-# Function to extract text from an Excel file
-def extract_text_from_excel(excel_path):
-    text = ""
-    try:
-        wb = load_workbook(excel_path)  # Load the Excel workbook
-        for sheet in wb.sheetnames:
-            ws = wb[sheet]
-            for row in ws.iter_rows(values_only=True):  # Iterate through rows
-                for cell in row:
-                    if isinstance(cell, str):
-                        text += cell + " "  # Append cell content to text
-    except Exception as e:
-        print(f"Error extracting text from {excel_path}: {e}")
-    return text
+def extract_from_docx(docx_path):
+    """Extract text and images from a DOCX file."""
+    doc = Document(docx_path)
+    text = "\n".join([para.text for para in doc.paragraphs])
+    images = []
+    for rel in doc.part.rels:
+        if "image" in rel:
+            img = doc.part.rels[rel].target_part.blob
+            images.append(Image.open(io.BytesIO(img)))
+    return text, images
 
-# Function to extract text from a DOCX file
-def extract_text_from_docx(file_path):
-    doc = Document(file_path)  # Load the DOCX document
-    full_text = []
-    for paragraph in doc.paragraphs:  # Iterate through paragraphs
-        full_text.append(paragraph.text)  # Append paragraph text to list
-    return '\n'.join(full_text)  # Join paragraphs with newline and return as single text
+def extract_from_xlsx(xlsx_path):
+    """Extract text from an XLSX file."""
+    data = pd.read_excel(xlsx_path)
+    return data.to_string(), []
 
-# Folder path where documents are stored
-folder_path = "content/DRIVE_OF_YOUR_PATH"
 
-# List all files in the folder
+folder_path = "FILE_PATH"
 file_paths = glob.glob(os.path.join(folder_path, "*"))
 
-raw_texts = []  # Initialize empty list to store raw text from documents
-
-# Process each file and extract text
+# Extract raw texts from files
+raw_texts = []
 for file_path in file_paths:
+    # print(file_path)
     if file_path.endswith(".pdf"):
-        text = extract_text_from_pdf(file_path)  # Extract text from PDF
+        text, images = extract_from_pdf(file_path)
+        # add_to_index('pdf', file_path, text_pdf, images_pdf)
     elif file_path.endswith(".xlsx"):
-        text = extract_text_from_excel(file_path)  # Extract text from Excel
+        text, _ = extract_from_xlsx(file_path)
+        # add_to_index('xlsx', file_path, text_xlsx, [])
     elif file_path.endswith(".docx"):
-        text = extract_text_from_docx(file_path)  # Extract text from DOCX
+        text, images = extract_from_docx(file_path)
+        # add_to_index('docx', file_path, text_docx, images_docx)
     else:
-        continue  # Skip files that are not PDF, XLSX, or DOCX
-    raw_texts.append(text)  # Append extracted text to raw_texts list
+        continue
+    raw_texts.append((text, images))
+    
 
-# Initialize text splitter to chunk text into manageable pieces
 text_splitter = CharacterTextSplitter(
-    separator="\n",  # Separator between chunks
-    chunk_size=4000,  # Size of each chunk
-    chunk_overlap=300,  # Overlap between chunks
-    length_function=len,  # Function to calculate length of text
+    separator="\n",
+    chunk_size=4000,
+    chunk_overlap=300,
+    length_function=len,
 )
 
-split_texts = []  # Initialize list to store split texts
+split_texts = []
+for text, images in raw_texts:
+    split_text = text_splitter.split_text(text)
+    split_texts.extend([(chunk, images) for chunk in split_text])
 
-# Split each raw text into smaller chunks
-for text in raw_texts:
-    split_text = text_splitter.split_text(text)  # Split text using text splitter
-    split_texts.extend(split_text)  # Extend the list with split texts
-
-print(split_texts)  # Print the list of split texts
-
-# Set OpenAI API key
 openai.api_key = "OPENAI_API_KEY"
 os.environ['OPENAI_API_KEY'] = "OPENAI_API_KEY"
-
-# Initialize OpenAIEmbeddings for generating embeddings
 embeddings = OpenAIEmbeddings()
+document_search = FAISS.from_texts([text for text, _ in split_texts], embeddings)
+chain = load_qa_chain(ChatOpenAI(model_name="gpt-4-turbo",temperature=0.1,
+openai_api_key=openai.api_key), chain_type="stuff")
+system_prompt = "give the response like QnA chatbot agent and dont show query as in answer."
 
-# Create FAISS index for efficient document similarity search
-document_search = FAISS.from_texts(split_texts, embeddings)
-
-# Load question answering chain using OpenAI's GPT-3.5 model
-chain = load_qa_chain(ChatOpenAI(model_name="gpt-3.5-turbo-16k", temperature=0.1, openai_api_key=openai.api_key), chain_type="stuff")
-
-# System prompt for the question answering system
-system_prompt = "You are a Q&A estate agent designed to answer customer questions accurately. You have access to information from provided XLSX files, including prices, availability, and contact details like phone numbers."
-
-# Loop to continuously prompt for user queries
-while True:
-    query = input("")  # Prompt user to enter a query
-
-    # Perform similarity search to find relevant documents
+def search_query(query):
+    query = f"{system_prompt} {query}"
     docs = document_search.similarity_search(query)
-
-    # Generate a response to the query using the question answering chain
     result = chain.invoke({'input_documents': docs, 'question': query})
-    print(result['output_text'])  # Print the output text from the question answering system
+
+
+    if any(keyword in query.lower() for keyword in ["plan","image", "picture", "photo", "diagram"]):
+        folder_path = "Folder_path" f
+        file_paths = glob.glob(os.path.join(folder_path, "*"))
+
+        query_words = query.lower().split()
+        image_files = [file for file in file_paths if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
+
+        matching_files = []
+
+        # List all files in the specified folder
+        for filename in image_files:
+            # Check if any of the query words are in the filename
+            if any(word in filename.lower() for word in query_words):
+                matching_files.append(filename)
+
+
+        if matching_files:
+            # Sort by relevance (e.g., number of matching words, specific phrases, etc.)
+            matching_files.sort(key=lambda x: sum(word in os.path.basename(x).lower() for word in query_words), reverse=True)
+            most_relevant_image = matching_files[0]
+            print(most_relevant_image)
+            images = [{"url": most_relevant_image}]
+
+            return {"output_text": "" if result else "No relevant content found.", "images": images}
+        else:
+            return {"output_text": "" if result else "No relevant content found.", "images": []}
+        
+        # print(matching_files)
+
+
+    return result if result else {"output_text": "No relevant content found.", "images": []}
+
+
+
+def display_results(query):
+    # Simulate a search result based on the query
+    result = search_query(query)
+    text_response = result.get('output_text', 'No relevant content found.')
+    images = result.get('images', [])
+
+    return text_response, images if images else []
+
+with gr.Blocks() as demo:
+
+    gr.Markdown("### Proplens' AI Assistant")
+    chatbot = gr.Chatbot(label="Chat History", elem_id="chatbot-output")
+    msg = gr.Textbox(label="Your Message", placeholder="Type your question here...")
+    clear = gr.Button("Clear Chat")
+
+    def respond(message, chat_history):
+        text_response, images = display_results(message)
+        image_urls = [quote(image['url']) for image in images]
+        chat_history.append((message, text_response))       
+        
+        
+        if image_urls:
+            for image_url in image_urls:
+                # Each image URL is added as a separate message
+                encoded_path = image_url
+                decoded_path = unquote(encoded_path)
+                with open(decoded_path, "rb") as image_file:
+                    # Encode the binary data to base64
+                    encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+
+                chat_history.append((None, gr.HTML(f'<img src="data:image/png;base64,{encoded_string}">')))
+                
+        
+        return "", chat_history
+
+    msg.submit(respond, [msg, chatbot], [msg, chatbot])
+    clear.click(lambda: (None, []), None, [msg, chatbot])
+
+demo.launch()
